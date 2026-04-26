@@ -132,6 +132,30 @@ export function createLayerItem(config) {
     });
   }
 
+  // Optional extra icon buttons inserted between the layer name and rename.
+  // Consumers pass their own button config; the shared layer component only
+  // knows how to render the button, not what the action means.
+  const extraBtns = [];
+  if (Array.isArray(config.extraButtons)) {
+    for (const btnCfg of config.extraButtons) {
+      if (!btnCfg || !btnCfg.icon || typeof btnCfg.onClick !== "function") continue;
+      const btn = document.createElement("div");
+      btn.className = "pxf-layer-icon";
+      if (btnCfg.active) btn.classList.add("active");
+      btn.title = btnCfg.title || "Layer action";
+      btn.appendChild(
+        btnCfg.active
+          ? _layerIconColored(btnCfg.icon, btnCfg.activeColor || "var(--pxf-accent)")
+          : _layerIcon(btnCfg.icon),
+      );
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        btnCfg.onClick(e);
+      });
+      extraBtns.push(btn);
+    }
+  }
+
   // Edit icon button
   let editBtn = null;
   if (config.onRename) {
@@ -160,6 +184,7 @@ export function createLayerItem(config) {
   });
 
   el.append(vis, thumbWrap, nameEl);
+  for (const btn of extraBtns) el.appendChild(btn);
   if (editBtn) el.appendChild(editBtn);
   el.appendChild(lock);
 
