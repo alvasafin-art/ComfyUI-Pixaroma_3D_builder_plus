@@ -18,11 +18,17 @@ import {
   allow_debug,
   createNodePreview,
   showNodePreview,
-  restoreNodePreview,
   activateNodePreview,
   downloadDataURL,
 } from "../shared/index.mjs";
+
 const PIXAROMA_3D_WORKFLOW_STATE_KEY = "pixaroma_3d_builder";
+
+const P3D_PREVIEW_MODES = [
+  { id: "all", label: "All", title: "Show image + overlay" },
+  { id: "image", label: "Image", title: "Show image output only" },
+  { id: "overlay", label: "Overlay", title: "Show overlay output only" },
+];
 
 function getWorkflow3DState() {
   const graph = app.graph;
@@ -48,6 +54,128 @@ function setWorkflow3DState(next) {
     : state.background_templates;
 }
 
+function _pathToPreviewUrl(path) {
+  if (!path) return null;
+  const normalized = String(path).replace(/\\/g, "/");
+  const chunks = normalized.split("/");
+  const filename = chunks.pop();
+  const subfolder = chunks.join("/") || "pixaroma";
+  if (!filename) return null;
+  return `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}&t=${Date.now()}`;
+}
+
+function _getPreviewPaths(meta) {
+  const paths = meta?.preview_paths || {};
+  return {
+    all: paths.all || meta?.all_path || meta?.composite_all_path || meta?.composite_path || null,
+    image: paths.image || meta?.image_path || meta?.composite_path || null,
+    overlay: paths.overlay || meta?.overlay_path || null,
+  };
+}
+
+function _ensure3DPreviewModeBar(parts) {
+  if (parts.p3dModeBar) return parts.p3dModeBar;
+
+  const bar = document.createElement("div");
+  bar.style.cssText = [
+    "display:none",
+    "width:100%",
+    "grid-template-columns:repeat(3,1fr)",
+    "gap:6px",
+    "margin:0 0 6px 0",
+  ].join(";");
+
+  // The DOM widget itself sits below the native "Open 3D Builder" button.
+  // Insert the mode buttons at the top of that widget so they appear
+  // between "Open 3D Builder" and the preview image.
+  parts.container.insertBefore(bar, parts.previewBox || parts.container.firstChild);
+  parts.p3dModeBar = bar;
+  return bar;
+}
+
+function _stylePreviewButton(btn, active, enabled) {
+  btn.style.background = active ? "#f66744" : "#1e2022";
+  btn.style.borderColor = active ? "#f66744" : "#3a3d40";
+  btn.style.color = active ? "#fff" : "#ccc";
+  btn.style.opacity = enabled ? "1" : "0.4";
+  btn.style.cursor = enabled ? "pointer" : "default";
+}
+
+function _show3DNodePreview(parts, meta, node, preferredMode = "all", dataURLs = null, onModeChange = null) {
+  if (!meta || typeof meta !== "object") return;
+
+  const dimText = `${meta.doc_w || "?"}\u00d7${meta.doc_h || "?"}`;
+  const paths = _getPreviewPaths(meta);
+  const sourceFor = (mode) => dataURLs?.[mode] || _pathToPreviewUrl(paths[mode]);
+
+  const available = P3D_PREVIEW_MODES
+    .map((m) => m.id)
+    .filter((mode) => !!sourceFor(mode));
+
+  if (!available.length) return;
+
+  const initialMode =
+    available.includes(preferredMode) ? preferredMode :
+    available.includes(meta.previewMode) ? meta.previewMode :
+    available.includes(parts.p3dPreviewMode) ? parts.p3dPreviewMode :
+    available[0];
+
+  const bar = _ensure3DPreviewModeBar(parts);
+  bar.innerHTML = "";
+  bar.style.display = "grid";
+
+  const showMode = (mode, userAction = false) => {
+    const src = sourceFor(mode);
+    if (!src) return;
+
+    // Transparent overlay previews are easier to understand on a checkerboard.
+    parts.previewBox.style.backgroundColor = mode === "overlay" ? "#1b1b1b" : "#000000";
+    parts.previewBox.style.backgroundImage = mode === "overlay"
+      ? "linear-gradient(45deg,#333 25%,transparent 25%),linear-gradient(-45deg,#333 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#333 75%),linear-gradient(-45deg,transparent 75%,#333 75%)"
+      : "";
+    parts.previewBox.style.backgroundSize = mode === "overlay" ? "16px 16px" : "";
+    parts.previewBox.style.backgroundPosition = mode === "overlay" ? "0 0,0 8px,8px -8px,-8px 0px" : "";
+
+    showNodePreview(parts, src, dimText, node);
+    parts.p3dPreviewMode = mode;
+
+    bar.querySelectorAll("button[data-p3d-preview-mode]").forEach((btn) => {
+      const btnMode = btn.dataset.p3dPreviewMode;
+      _stylePreviewButton(btn, btnMode === mode, !!sourceFor(btnMode));
+    });
+
+    if (userAction) onModeChange?.(mode);
+  };
+
+  for (const def of P3D_PREVIEW_MODES) {
+    const enabled = !!sourceFor(def.id);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.p3dPreviewMode = def.id;
+    btn.textContent = def.label;
+    btn.title = enabled ? def.title : `${def.label} preview is not available in this saved scene yet`;
+    btn.disabled = !enabled;
+    btn.style.cssText = [
+      "height:26px",
+      "border:1px solid #3a3d40",
+      "border-radius:6px",
+      "background:#1e2022",
+      "color:#ccc",
+      "font-size:12px",
+      "font-family:inherit",
+      "pointer-events:auto",
+    ].join(";");
+    _stylePreviewButton(btn, def.id === initialMode, enabled);
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (enabled) showMode(def.id, true);
+    });
+    bar.appendChild(btn);
+  }
+
+  showMode(initialMode, false);
+}
 
 app.registerExtension({
   name: "Pixaroma.3DEditor",
@@ -90,6 +218,22 @@ app.registerExtension({
 
     // ── State ──
     let sceneJson = "{}";
+    let previewMode = "all";
+
+    const setPreviewMode = (mode) => {
+      if (!P3D_PREVIEW_MODES.some((m) => m.id === mode)) return;
+      previewMode = mode;
+      try {
+        const meta = JSON.parse(sceneJson || "{}");
+        if (meta && typeof meta === "object") {
+          meta.previewMode = mode;
+          sceneJson = JSON.stringify(meta);
+          const w = widget || node.widgets?.find((x) => x.name === "SceneWidget");
+          if (w) w.value = { scene_json: sceneJson };
+        }
+      } catch {}
+      node.setDirtyCanvas(true, true);
+    };
 
     // ── Separate button widget ──
     node.addWidget("button", "Open 3D Builder", null, () => {
@@ -99,6 +243,7 @@ app.registerExtension({
         setWorkflow3DState(next);
         node.setDirtyCanvas(true, true);
       };
+      editor._nodePreviewMode = previewMode;
 
       // Apply default BG from ComfyUI settings (if user configured it).
       // ComfyUI's `color` setting type returns values without the leading
@@ -116,8 +261,15 @@ app.registerExtension({
         }
       } catch {}
 
-      editor.onSave = (jsonStr, dataURL) => {
-        sceneJson = jsonStr;
+      editor.onSave = (jsonStr, dataURL, previewDataURLs = null) => {
+        try {
+          const meta = JSON.parse(jsonStr || "{}");
+          meta.previewMode = previewMode;
+          sceneJson = JSON.stringify(meta);
+        } catch {
+          sceneJson = jsonStr;
+        }
+
         // Guard + re-lookup: ComfyUI's Vue frontend can tear down the
         // DOM widget while the editor is still open (same pattern as
         // the overlay-removal case noted in CLAUDE.md). If that
@@ -127,15 +279,20 @@ app.registerExtension({
         // from the `sceneJson` closure var (just refreshed) so the
         // next workflow execution still picks up fresh data.
         const w = widget || node.widgets?.find((x) => x.name === "SceneWidget");
-        if (w) w.value = { scene_json: jsonStr };
+        if (w) w.value = { scene_json: sceneJson };
 
-        if (dataURL) {
-          let dimText = null;
-          try {
-            const meta = JSON.parse(jsonStr);
-            dimText = `${meta.doc_w || "?"}\u00d7${meta.doc_h || "?"}`;
-          } catch {}
-          showNodePreview(parts, dataURL, dimText, node);
+        try {
+          const meta = JSON.parse(sceneJson || "{}");
+          _show3DNodePreview(parts, meta, node, previewMode, previewDataURLs, setPreviewMode);
+        } catch {
+          if (dataURL) {
+            let dimText = null;
+            try {
+              const meta = JSON.parse(sceneJson);
+              dimText = `${meta.doc_w || "?"}\u00d7${meta.doc_h || "?"}`;
+            } catch {}
+            showNodePreview(parts, dataURL, dimText, node);
+          }
         }
 
         node.setDirtyCanvas(true, true);
@@ -159,10 +316,18 @@ app.registerExtension({
       setValue: (v) => {
         if (v && typeof v === "object") {
           sceneJson = v.scene_json || "{}";
-          restoreNodePreview(parts, sceneJson, node);
+          try {
+            const meta = JSON.parse(sceneJson || "{}");
+            if (P3D_PREVIEW_MODES.some((m) => m.id === meta.previewMode)) {
+              previewMode = meta.previewMode;
+            }
+            _show3DNodePreview(parts, meta, node, previewMode, null, setPreviewMode);
+          } catch {
+            // silently ignore malformed JSON
+          }
         }
       },
-      getMinHeight: () => 210,
+      getMinHeight: () => 245,
       margin: 5,
     });
 

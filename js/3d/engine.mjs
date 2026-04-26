@@ -181,7 +181,7 @@ Pixaroma3DEditor.prototype._initThree = function () {
       // Starting drag — record initial positions/rotations/scales of all selected
       this._multiDragStart = new Map();
       for (const o of this.selectedObjs) {
-        if (o === this.activeObj) continue;
+        if (o === this.activeObj || o.userData?.locked) continue;
         this._multiDragStart.set(o, {
           pos: o.position.clone(),
           rot: o.rotation.clone(),
@@ -208,6 +208,7 @@ Pixaroma3DEditor.prototype._initThree = function () {
     if (!this._multiDragStart || !this.activeObj) return;
     const mode = this.transformCtrl.getMode();
     for (const [o, start] of this._multiDragStart) {
+      if (o.userData?.locked) continue;
       if (mode === "translate") {
         o.position.set(
           start.pos.x + (this.activeObj.position.x - this._activeStartPos.x),
@@ -233,9 +234,11 @@ Pixaroma3DEditor.prototype._initThree = function () {
         o.scale.set(start.scl.x * sx, start.scl.y * sy, start.scl.z * sz);
       }
     }
+    this._syncOutlineSelection?.();
   });
   this.transformCtrl.addEventListener("mouseUp", () => {
     this._syncProps();
+    this._updateTransformSliders?.();
     this._updateLayers();
     // Snap the shadow frustum to the new scene bounds right now —
     // otherwise the frustum stays at its pre-drag size for up to a

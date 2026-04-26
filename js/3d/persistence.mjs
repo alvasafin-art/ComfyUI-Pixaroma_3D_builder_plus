@@ -41,6 +41,7 @@ Pixaroma3DEditor.prototype._serializeScene = function () {
         rotation: { x: o.rotation.x, y: o.rotation.y, z: o.rotation.z },
         scale: { x: o.scale.x, y: o.scale.y, z: o.scale.z },
         visible: o.visible,
+        overlayLayer: !!o.userData.overlayLayer,
       };
       // Imported-model bookkeeping — only user uploads carry path/ext.
       // Bunny is rebuilt from the bundled asset so needs no importPath.
@@ -338,6 +339,7 @@ function applyObjectData(m, od) {
   m.userData.id = od.id || m.userData.id;
   m.userData.colorHex = od.colorHex;
   m.userData.locked = od.locked || false;
+  m.userData.overlayLayer = !!od.overlayLayer;
   if (od.position) m.position.set(od.position.x, od.position.y, od.position.z);
   if (od.rotation) m.rotation.set(od.rotation.x, od.rotation.y, od.rotation.z);
   if (od.scale) m.scale.set(od.scale.x, od.scale.y, od.scale.z);
@@ -617,6 +619,12 @@ Pixaroma3DEditor.prototype._save = async function () {
   if (this._closed || !this.renderer) return;
   const THREE = getTHREE();
   this._layout.setSaving();
+
+  const projectId = (this.projectId || "p3d").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+  const allProjectId = `${projectId.slice(0, 60)}_all`;
+  const overlayProjectId = `${projectId.slice(0, 56)}_overlay`;
+  let restoreAfterRender = null;
+
   try {
     const pr = this.renderer.getPixelRatio();
     const vp = this.el.viewport;
@@ -633,6 +641,27 @@ Pixaroma3DEditor.prototype._save = async function () {
     this.camera.setViewOffset(vpW, vpH, fr.x, fr.y, fr.w, fr.h);
     this.camera.updateProjectionMatrix();
 
+    const originalVisibility = new Map(this.objects.map((o) => [o, o.visible]));
+    const originalGroundVisible = this._groundMesh ? this._groundMesh.visible : null;
+    const originalSceneBackground = this.scene.background;
+    const originalClearColor = new THREE.Color();
+    this.renderer.getClearColor(originalClearColor);
+    const originalClearAlpha = this.renderer.getClearAlpha?.() ?? 1;
+
+    restoreAfterRender = () => {
+      for (const [obj, visible] of originalVisibility) obj.visible = visible;
+      if (this._groundMesh && originalGroundVisible !== null)
+        this._groundMesh.visible = originalGroundVisible;
+      this.scene.background = originalSceneBackground;
+      this.renderer.setClearColor(originalClearColor, originalClearAlpha);
+      this.camera.clearViewOffset();
+      if (this.gridHelper) this.gridHelper.visible = this._showGrid;
+      if (this._gizmoHelper) this._gizmoHelper.visible = this._showGizmo;
+      if (this._canvasFrame) this._canvasFrame.setVisible(true);
+      this.renderer.setPixelRatio(pr);
+      this._onResize();
+    };
+
     if (this.gridHelper) this.gridHelper.visible = false;
     if (this._gizmoHelper) this._gizmoHelper.visible = false;
     if (this._canvasFrame) this._canvasFrame.setVisible(false);
@@ -640,15 +669,8 @@ Pixaroma3DEditor.prototype._save = async function () {
     // save render below calls renderer.render() directly so it never
     // reaches the exported PNG — no toggling needed.
 
-    // For save render: temporarily restore scene bg if no bg image
     const hadBgImage = this.el.bgImgEl && this._bgImg.path;
-    if (!hadBgImage && this.scene.background === null)
-      this.scene.background = new THREE.Color(this.bgColor);
-    this.renderer.render(this.scene, this.camera);
-
-    let dataURL;
-    if (hadBgImage) {
-      // Composite bg image behind 3D render at canvas resolution
+    const compositeBackgroundImage = () => {
       const compCanvas = document.createElement("canvas");
       compCanvas.width = this.docW;
       compCanvas.height = this.docH;
@@ -669,73 +691,118 @@ Pixaroma3DEditor.prototype._save = async function () {
       ctx.globalAlpha = this._bgImg.opacity / 100;
       ctx.translate(cx, cy);
       ctx.rotate((this._bgImg.rotation * Math.PI) / 180);
+      if (this._bgImg._flipH || this._bgImg._flipV)
+        ctx.scale(this._bgImg._flipH ? -1 : 1, this._bgImg._flipV ? -1 : 1);
       ctx.drawImage(img, -iw / 2, -ih / 2, iw, ih);
       ctx.restore();
       ctx.drawImage(this.renderer.domElement, 0, 0);
-      dataURL = compCanvas.toDataURL("image/png");
-    } else {
-      dataURL = this.renderer.domElement.toDataURL("image/png");
-    }
+      return compCanvas.toDataURL("image/png");
+    };
 
-    // If transparent disk save requested, do a second render without bg
+    const setObjectVisibilityForPass = (pass) => {
+      for (const obj of this.objects) {
+        const wasVisible = originalVisibility.get(obj) !== false;
+        if (pass === "main") {
+          obj.visible = wasVisible && !obj.userData.overlayLayer;
+        } else if (pass === "overlay") {
+          obj.visible = wasVisible && !!obj.userData.overlayLayer;
+        } else {
+          obj.visible = wasVisible;
+        }
+      }
+    };
+
+    const renderPass = ({ pass, transparent = false, includeBgImage = false, hideGround = false }) => {
+      setObjectVisibilityForPass(pass);
+      if (this._groundMesh) {
+        this._groundMesh.visible = hideGround ? false : originalGroundVisible !== false;
+      }
+
+      if (transparent || includeBgImage) {
+        this.scene.background = null;
+        this.renderer.setClearColor(0x000000, 0);
+      } else if (!this.scene.background) {
+        this.scene.background = new THREE.Color(this.bgColor);
+        this.renderer.setClearColor(this.bgColor, 1);
+      }
+
+      this.renderer.clear?.();
+      this.renderer.render(this.scene, this.camera);
+
+      if (includeBgImage && hadBgImage) {
+        return compositeBackgroundImage();
+      }
+      return this.renderer.domElement.toDataURL("image/png");
+    };
+
+    // image = normal image output, without objects marked as overlay layer.
+    const imageDataURL = renderPass({
+      pass: "main",
+      transparent: false,
+      includeBgImage: !!hadBgImage,
+      hideGround: false,
+    });
+
+    // all = image + overlay layer together; this is only for the node preview.
+    const allDataURL = renderPass({
+      pass: "all",
+      transparent: false,
+      includeBgImage: !!hadBgImage,
+      hideGround: false,
+    });
+
+    // overlay = transparent render of overlay-layer objects only. Saved even
+    // when empty so the outside node preview always has all three tabs.
+    const overlayDataURL = renderPass({
+      pass: "overlay",
+      transparent: true,
+      includeBgImage: false,
+      hideGround: true,
+    });
+
     let transDataURL = null;
     if (this._diskSavePending && this._transparentBg) {
-      this.scene.background = null;
-      this.renderer.setClearColor(0x000000, 0);
-      this.renderer.render(this.scene, this.camera);
-      if (hadBgImage) {
-        const tCvs = document.createElement("canvas");
-        tCvs.width = this.docW;
-        tCvs.height = this.docH;
-        const tCtx = tCvs.getContext("2d");
-        const img = this.el.bgImgEl;
-        const aspect = this._bgImg._natW / this._bgImg._natH;
-        const baseW = this.docW;
-        const baseH = baseW / aspect;
-        const sc = this._bgImg.scale / 100;
-        const iw = baseW * sc,
-          ih = baseH * sc;
-        const cx = this.docW / 2 + (this._bgImg.x / 100) * this.docW;
-        const cy = this.docH / 2 + (this._bgImg.y / 100) * this.docH;
-        tCtx.save();
-        tCtx.globalAlpha = this._bgImg.opacity / 100;
-        tCtx.translate(cx, cy);
-        tCtx.rotate((this._bgImg.rotation * Math.PI) / 180);
-        tCtx.drawImage(img, -iw / 2, -ih / 2, iw, ih);
-        tCtx.restore();
-        tCtx.drawImage(this.renderer.domElement, 0, 0);
-        transDataURL = tCvs.toDataURL("image/png");
-      } else {
-        transDataURL = this.renderer.domElement.toDataURL("image/png");
-      }
+      transDataURL = renderPass({
+        pass: "main",
+        transparent: true,
+        includeBgImage: false,
+        hideGround: false,
+      });
     }
 
-    // Restore transparent bg for live preview if bg image active
-    if (hadBgImage) {
-      this.scene.background = null;
-      this.renderer.setClearColor(0x000000, 0);
-    }
+    // Restore scene / renderer state before awaiting uploads so the editor
+    // immediately returns to the live preview exactly as the user left it.
+    restoreAfterRender?.();
+    restoreAfterRender = null;
 
-    // Restore camera: clear view offset and restore live preview state
-    this.camera.clearViewOffset();
-    if (this.gridHelper) this.gridHelper.visible = this._showGrid;
-    if (this._gizmoHelper) this._gizmoHelper.visible = this._showGizmo;
-    if (this._canvasFrame) this._canvasFrame.setVisible(true);
-    this.renderer.setPixelRatio(pr);
-    this._onResize();
+    const imageRes = await ThreeDAPI.saveRender(projectId, imageDataURL);
+    const allRes = await ThreeDAPI.saveRender(allProjectId, allDataURL);
+    const overlayRes = await ThreeDAPI.saveRender(overlayProjectId, overlayDataURL);
 
-    const res = await ThreeDAPI.saveRender(this.projectId, dataURL);
-    if (res.status === "success") {
+    if (imageRes.status === "success" && allRes.status === "success" && overlayRes.status === "success") {
       const sd = this._serializeScene();
-      sd.composite_path = res.composite_path;
-      if (this.onSave) this.onSave(JSON.stringify(sd), dataURL);
+      sd.composite_path = imageRes.composite_path;
+      sd.image_path = imageRes.composite_path;
+      sd.overlay_path = overlayRes.composite_path;
+      sd.all_path = allRes.composite_path;
+      sd.preview_paths = {
+        all: allRes.composite_path,
+        image: imageRes.composite_path,
+        overlay: overlayRes.composite_path,
+      };
+      if (this.onSave) this.onSave(JSON.stringify(sd), allDataURL, {
+        all: allDataURL,
+        image: imageDataURL,
+        overlay: overlayDataURL,
+      });
       if (this._diskSavePending) {
         this._diskSavePending = false;
-        if (this.onSaveToDisk) this.onSaveToDisk(transDataURL || dataURL);
+        if (this.onSaveToDisk) this.onSaveToDisk(transDataURL || imageDataURL);
       }
       this._layout.setSaved();
     } else this._layout.setSaveError("Save failed");
   } catch (e) {
+    restoreAfterRender?.();
     console.error("[P3D]", e);
     this._layout.setSaveError("Save error");
   }

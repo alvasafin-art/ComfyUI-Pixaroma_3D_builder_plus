@@ -764,6 +764,21 @@ Pixaroma3DEditor.prototype._updateLayers = function () {
       active: isActive,
       multiSelected: isMulti,
       thumbnail: thumbnail,
+      extraButtons: [
+        {
+          icon: "overlay",
+          title: obj.userData.overlayLayer
+            ? "Overlay layer: included only in overlay output"
+            : "Main layer: included in main image output",
+          active: !!obj.userData.overlayLayer,
+          onClick: () => {
+            this._pushUndo?.();
+            obj.userData.overlayLayer = !obj.userData.overlayLayer;
+            this._updateLayers();
+            this._syncProps?.();
+          },
+        },
+      ],
       onVisibilityToggle: () => {
         obj.visible = !obj.visible;
         this._updateLayers();

@@ -909,46 +909,104 @@ export class Pixaroma3DEditor {
       this._wireFineSlider?.(slider, numIn);
       const apply = (v) => {
         v = this._getFineSliderValue?.(slider, v) ?? v;
-        if (!this.activeObj || this.activeObj.userData.locked) return;
+        const active = this.activeObj;
+        if (!active || active.userData.locked) return;
+
+        let targets = this.selectedObjs.size
+          ? [...this.selectedObjs]
+          : [active];
+        if (!targets.includes(active)) targets.unshift(active);
+        targets = targets.filter((o) => o && !o.userData?.locked);
+        if (!targets.length) return;
+
+        const captureStart = () => {
+          const map = new Map();
+          for (const o of targets) {
+            map.set(o, {
+              pos: o.position.clone(),
+              rot: o.rotation.clone(),
+              scl: o.scale.clone(),
+            });
+          }
+          return map;
+        };
+
         if (!dragState.snapshotted) {
           this._pushUndo();
           dragState.snapshotted = true;
+          dragState.start = captureStart();
         }
+        if (!dragState.start?.has(active)) dragState.start = captureStart();
+
         const val = +v;
+        if (!Number.isFinite(val)) return;
         const mode = this.toolMode;
-        const obj = this.activeObj;
+        const activeStart = dragState.start.get(active);
+        if (!activeStart) return;
+
         if (mode === "move") {
-          obj.position[axLower] = val;
+          const delta = val - activeStart.pos[axLower];
+          for (const obj of targets) {
+            const start = dragState.start.get(obj);
+            if (start) obj.position[axLower] = start.pos[axLower] + delta;
+          }
         } else if (mode === "rotate") {
-          obj.rotation[axLower] = (val * Math.PI) / 180;
+          const nextRad = (val * Math.PI) / 180;
+          const delta = nextRad - activeStart.rot[axLower];
+          for (const obj of targets) {
+            const start = dragState.start.get(obj);
+            if (start) obj.rotation[axLower] = start.rot[axLower] + delta;
+          }
         } else if (mode === "scale") {
           // Clamp away from zero so the object can't collapse and
           // then fail to come back (scale 0 is irrecoverable via slider).
           const clamped = Math.max(0.01, val);
+          const base = activeStart.scl[axLower] || 1;
+          const ratio = base ? clamped / base : 1;
+
           if (this.el.xformUniform?.checked) {
-            // Lock Proportions: drive all three axes together. Also
-            // sync the OTHER two sliders visually so the UI matches
-            // what the geometry is doing.
-            obj.scale.set(clamped, clamped, clamped);
+            // Lock Proportions: scale the whole selected set by the same
+            // ratio, preserving relative sizes between linked layers.
+            for (const obj of targets) {
+              const start = dragState.start.get(obj);
+              if (!start) continue;
+              obj.scale.set(
+                Math.max(0.01, start.scl.x * ratio),
+                Math.max(0.01, start.scl.y * ratio),
+                Math.max(0.01, start.scl.z * ratio),
+              );
+            }
+            // Sync the OTHER two sliders visually from the active object.
             for (const s of this.el.xformSliders) {
-              if (s.axis === axis) continue;
-              s.slider.value = clamped;
-              s.numIn.value = this._formatXformValue(clamped);
+              const scaleVal = active.scale[s.axis.toLowerCase()];
+              s.slider.value = scaleVal;
+              s.numIn.value = this._formatXformValue(scaleVal);
             }
           } else {
-            obj.scale[axLower] = clamped;
+            for (const obj of targets) {
+              const start = dragState.start.get(obj);
+              if (start) obj.scale[axLower] = Math.max(0.01, start.scl[axLower] * ratio);
+            }
           }
         }
         // Keep this row's number input in sync if apply() fired from the slider.
-        numIn.value = this._formatXformValue(val);
+        const shown = mode === "scale" ? Math.max(0.01, val) : val;
+        numIn.value = this._formatXformValue(shown);
         this._updateShadowFrustum?.();
+        this._syncOutlineSelection?.();
       };
       slider.addEventListener("input", () => apply(slider.value));
       // Reset the per-drag flag on pointer-up so the next drag
       // creates a fresh undo entry.
-      const endDrag = () => { dragState.snapshotted = false; };
+      const endDrag = () => {
+        dragState.snapshotted = false;
+        dragState.start = null;
+        this._syncProps?.();
+        this._updateLayers?.();
+      };
       slider.addEventListener("change", endDrag);
       slider.addEventListener("mouseup", endDrag);
+      slider.addEventListener("pointerup", endDrag);
       numIn.addEventListener("change", () => {
         let v = +numIn.value;
         if (isNaN(v)) v = +slider.value;
