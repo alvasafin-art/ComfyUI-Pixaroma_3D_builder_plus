@@ -1,0 +1,74 @@
+3D Builder Pixaroma — Overlay Output, External Preview Modes and Multi-Select Transform Fix
+Summary
+This update improves the 3D Builder node workflow by adding proper overlay support, external preview mode switching, and fixing multi-object transform behavior.
+The main goal is to make the node usable for workflows where the background image and 3D/text overlay need to be handled separately, while keeping the original combined preview available.
+Changes
+1.	Added separate overlay output 
+Added support for saving a separate transparent overlay layer.
+This is needed to preserve text, icons, logos and other graphic elements without distortions after image editing with a model.
+The edited base image can be generated separately, and the clean overlay is then placed on top of it.
+The node now provides:
+•	image — base image/background; 
+•	overlay — transparent overlay with 3D/text elements; 
+•	width 
+•	height 
+•	This helps avoid warped text, broken symbols and distorted logos in the final result.
+•	Added external preview switching inside the ComfyUI node 
+Added preview mode buttons directly in the ComfyUI node UI:
+•	All — shows image + overlay combined. 
+•	Image — shows only the background/image preview. 
+•	Overlay — shows only the 3D overlay preview. 
+The preview controls are placed outside the 3D Builder window, directly under the Open 3D Builder button and above the node preview image.
+The preview switch was intentionally not added inside the 3D Builder editor UI, because it is only needed for the node preview in ComfyUI.
+3.	Added saving of multiple preview renders 
+The save logic now stores separate preview render paths:
+preview_paths.all
+preview_paths.image
+preview_paths.overlay
+This allows the external node preview to switch between the available visual modes without reopening the 3D Builder.
+Compatibility with the existing logic is preserved:
+•	composite_path remains available. 
+•	overlay_path remains available. 
+•	Existing workflows should continue to work. 
+4.	Fixed multi-select transform behavior 
+Previously, when multiple models were selected, transform controls such as position, rotation, and scale were only applied to the active object.
+This update changes transform behavior so that edits are applied to all selected unlocked objects.
+Fixed for:
+•	Move sliders 
+•	Rotate sliders 
+•	Scale controls 
+•	Gizmo-based editing in the viewport 
+The active object is still used as the reference object, but transform deltas are now applied consistently to the full selection.
+5.	Improved locked object handling 
+Locked objects are skipped during multi-object transforms.
+This prevents accidental changes to objects that should remain fixed, while still allowing unlocked selected objects to be edited together.
+Updated files
+nodes/node_3d.py
+js/framework/layers.mjs
+js/3d/objects.mjs
+js/3d/persistence.mjs
+js/3d/index.js
+js/3d/core.mjs
+js/3d/engine.mjs
+assets/icons/layers/overlay.svg
+Implementation notes
+•	The preview mode UI is implemented only in the ComfyUI node interface. 
+•	The internal 3D Builder editor UI was kept clean and unchanged regarding preview mode buttons. 
+•	The save logic was extended to generate separate render outputs instead of relying on a single combined preview. 
+•	Multi-select transform was fixed by applying transform deltas/ratios to all selected unlocked objects instead of only activeObj. 
+•	Overlay output support was added to the node output structure and layer framework. 
+Testing checklist
+Tested/checked:
+•	3D Builder opens correctly. 
+•	Existing scene editing remains functional. 
+•	Separate overlay output is available. 
+•	Overlay layer icon is available. 
+•	Multi-select transform works with sliders. 
+•	Multi-select transform works with viewport gizmo. 
+•	Locked objects are not modified during group transforms. 
+•	External node preview can switch between All, Image, and Overlay. 
+•	Overlay output remains separate from the background/image output. 
+•	Existing output compatibility is preserved. 
+Result
+This update makes the node more practical for workflows where the user needs a normal image output, a transparent 3D overlay output, quick preview switching in the node, and proper synchronized editing of multiple selected 3D layers.
+
